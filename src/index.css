@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+html { scroll-padding-top: 9rem; }
+button, select, input { touch-action: manipulation; }
