@@ -1,7 +1,18 @@
 import { createClient } from "@supabase/supabase-js";
 
-const url = import.meta.env.VITE_SUPABASE_URL;
-const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+// Tolerante a errores al pegar las variables: quita comillas, espacios y cualquier
+// ruta extra (ej. "/rest/v1/"), que provoca "Invalid path specified in request URL".
+const clean = (v) => String(v ?? "").trim().replace(/^["']+|["']+$/g, "").trim();
+const toOrigin = (v) => {
+  const raw = clean(v);
+  if (!raw) return "";
+  for (const candidate of [raw, `https://${raw}`]) {
+    try { return new URL(candidate).origin; } catch { /* probar la siguiente */ }
+  }
+  return "";
+};
+const url = toOrigin(import.meta.env.VITE_SUPABASE_URL);
+const key = clean(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY);
 
 // Sin variables de entorno la app funciona solo en local (LocalStorage).
 export const cloudEnabled = Boolean(url && key);

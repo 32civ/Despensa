@@ -17,10 +17,11 @@ export function useCloudSync(houseId, items, setLocal) {
   const ref = useRef(items);
   const ready = useRef(false);
   const pending = useRef(0);
+  const authed = useRef(false);
   const refreshRef = useRef(() => {});
   const [status, setStatus] = useState(cloudEnabled && houseId ? "connecting" : "local");
   const [detail, setDetail] = useState("");
-  const fail = (msg, e) => { setStatus("error"); setDetail(e?.message ? `${msg}: ${e.message}` : msg); };
+  const fail = (msg, e) => { setStatus("error"); setDetail((d) => d || (e?.message ? `${msg}: ${e.message}` : msg)); };
 
   useEffect(() => {
     if (!cloudEnabled || !houseId) { ready.current = false; setStatus("local"); return; }
@@ -28,7 +29,9 @@ export function useCloudSync(houseId, items, setLocal) {
     let channel;
     let timer;
     ready.current = false;
+    authed.current = false;
     setStatus("connecting");
+    setDetail("");
     const seededKey = `despensa:seeded:${houseId}`;
 
     const load = async () => {
@@ -56,7 +59,7 @@ export function useCloudSync(houseId, items, setLocal) {
       setDetail("");
       setStatus("online");
     };
-    const refresh = () => { clearTimeout(timer); timer = setTimeout(load, 250); };
+    const refresh = () => { if (!authed.current) return; clearTimeout(timer); timer = setTimeout(load, 250); };
     refreshRef.current = refresh;
 
     (async () => {
@@ -68,6 +71,7 @@ export function useCloudSync(houseId, items, setLocal) {
       const { error } = await supabase.rpc("join_household", { code: houseId });
       if (error) return fail("No se pudo unir a la casa (¿ejecutaste el SQL completo?)", error);
       if (stopped) return;
+      authed.current = true;
       channel = supabase.channel(`despensa-${houseId}`)
         .on("postgres_changes",
           { event: "*", schema: "public", table: "items", filter: `household_id=eq.${houseId}` }, refresh)
