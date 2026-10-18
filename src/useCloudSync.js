@@ -4,6 +4,7 @@ import { supabase, cloudEnabled } from "./supabase";
 const toRow = (houseId, it) => ({
   household_id: houseId, id: it.id, name: it.name, emoji: it.emoji, zone: it.zone,
   qty: it.qty, unit: it.unit, par: it.par, sort_order: it.order ?? 0,
+  ...(it.barcode ? { barcode: it.barcode } : {}), // solo si existe: la app sigue funcionando antes de la migración
 });
 const fromRow = ({ household_id, sort_order, updated_at, ...rest }) => ({ ...rest, order: sort_order });
 

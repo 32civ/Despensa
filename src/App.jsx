@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   Search, Moon, Sun, Plus, Minus, Pencil, Trash2, X, ShoppingCart,
-  PackageX, PackageCheck, LayoutGrid, MessageCircle, Copy, Users,
+  PackageX, PackageCheck, LayoutGrid, MessageCircle, Copy, Users, ScanBarcode,
 } from "lucide-react";
 import { cloudEnabled, newHouseId } from "./supabase";
 import { useCloudSync } from "./useCloudSync";
+import { normalizeBarcode, lookupProduct } from "./barcode";
+
+const Scanner = lazy(() => import("./Scanner.jsx")); // la cámara solo se descarga al usarla
 
 /* ───────────── Datos y constantes ───────────── */
 const ZONES = [
@@ -37,6 +40,7 @@ const MOCK = [
 /* ───────────── Utilidades ───────────── */
 const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 const round = (n) => Math.round(n * 1000) / 1000; // evita 0.1 + 0.2
+const norm = (s) => String(s).normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase().trim();
 const nf = new Intl.NumberFormat("es", { maximumFractionDigits: 3 });
 const prefersDark = () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
 
@@ -121,6 +125,9 @@ export default function App() {
   const [houseId, setHouseId] = useState(initHouse);
   const { setItems, status, detail } = useCloudSync(houseId, items, setLocal);
   const [sharing, setSharing] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const [dark, setDark] = usePersistentState("despensa:dark", prefersDark(), (v) => typeof v === "boolean");
   const initialView = useRef(readUrl()).current;
   const [tab, setTab] = useState(initialView.tab); // todo | id de zona | compras
@@ -179,6 +186,17 @@ export default function App() {
       setItems((l) => [...l.slice(0, index), item, ...l.slice(index)]));
   };
   const save = (data) => {
+    // Producto escaneado cuyo nombre ya existe sin código: se vincula en vez de duplicarlo.
+    if (!data.id && data.barcode) {
+      const twin = itemsRef.current.find((i) => !i.barcode && norm(i.name) === norm(data.name));
+      if (twin) {
+        const qty = round(twin.qty + data.qty);
+        update(twin.id, { barcode: data.barcode, qty, par: Math.max(twin.par, qty) });
+        setEditing(null);
+        notify(`Código vinculado a «${twin.name}» (+${nf.format(data.qty)})`);
+        return;
+      }
+    }
     setItems((l) =>
       data.id
         ? l.map((i) => i.id === data.id
@@ -187,6 +205,21 @@ export default function App() {
         : [...l, { ...data, id: uid(), par: Math.max(1, data.qty), order: Date.now() }]
     );
     setEditing(null);
+  };
+
+  // Cada lectura suma 1 unidad. Si el código es nuevo, se busca y se pide confirmar el producto.
+  const scanCode = async (raw) => {
+    const code = normalizeBarcode(raw);
+    if (!code) return { type: "error", msg: `Código no válido: ${String(raw).slice(0, 20)}` };
+    const item = itemsRef.current.find((i) => i.barcode === code);
+    if (item) {
+      const qty = round(item.qty + 1);
+      update(item.id, { qty, par: Math.max(item.par, qty) });
+      return { type: "added", msg: `${item.emoji} ${item.name} +1 (ahora ${nf.format(qty)} ${item.unit})` };
+    }
+    const info = await lookupProduct(code);
+    setEditing({ name: info?.name ?? "", emoji: info?.emoji ?? "🛒", zone: info?.zone ?? "alacena", qty: 1, unit: "piezas", barcode: code });
+    return { type: "new", msg: info ? `Producto nuevo: ${info.name}. Confírmalo.` : `Código ${code} sin datos. Escribe el nombre una vez.` };
   };
 
   const copyList = async () => {
@@ -271,7 +304,7 @@ export default function App() {
         )}
       </main>
 
-      <div role="status" aria-live="polite" className="pointer-events-none fixed inset-x-4 bottom-[max(6.5rem,calc(env(safe-area-inset-bottom)+6rem))] z-30 mx-auto max-w-sm">
+      <div role="status" aria-live="polite" className="pointer-events-none fixed inset-x-4 bottom-[max(6.5rem,calc(env(safe-area-inset-bottom)+6rem))] z-50 mx-auto max-w-sm">
         {toast && (
           <div className="pointer-events-auto flex items-center gap-3 rounded-xl bg-stone-900 px-4 py-3 text-sm text-white shadow-lg dark:bg-stone-100 dark:text-stone-900">
             <span className="min-w-0 flex-1 break-words">{toast.msg}</span>
@@ -285,18 +318,31 @@ export default function App() {
         )}
       </div>
 
-      <button onClick={() => setEditing("new")}
-        className={`fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] right-[max(1.5rem,env(safe-area-inset-right))] z-20 flex h-14 items-center gap-2 rounded-full bg-emerald-700 px-5 font-semibold text-white shadow-lg hover:bg-emerald-600 ${ring}`}>
-        <Plus aria-hidden="true" className="h-5 w-5" /> Agregar
-      </button>
+      <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] z-20 flex items-center gap-2">
+        <button onClick={() => setScanning(true)}
+          className={`flex h-14 items-center gap-2 rounded-full bg-stone-900 px-4 font-semibold text-white shadow-lg hover:bg-stone-700 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white ${ring}`}>
+          <ScanBarcode aria-hidden="true" className="h-5 w-5" /> Escanear compras
+        </button>
+        <button onClick={() => setEditing("new")}
+          className={`flex h-14 items-center gap-2 rounded-full bg-emerald-700 px-5 font-semibold text-white shadow-lg hover:bg-emerald-600 ${ring}`}>
+          <Plus aria-hidden="true" className="h-5 w-5" /> Agregar
+        </button>
+      </div>
 
       {sharing && (
         <ShareModal houseId={houseId} status={status} detail={detail} onClose={() => setSharing(false)}
           onJoin={(id) => { try { localStorage.setItem(HOUSE_KEY, id); } catch { /* ignorar */ } setHouseId(id); setSharing(false); notify("Conectado a la despensa compartida"); }} />
       )}
 
+      {scanning && (
+        <Suspense fallback={null}>
+          <Scanner paused={!!editing} onClose={() => setScanning(false)} onCode={scanCode} />
+        </Suspense>
+      )}
+
       {editing && (
         <ProductModal
+          names={editing !== "new" && !editing.id && editing.barcode ? items.filter((i) => !i.barcode).map((i) => i.name) : undefined}
           initial={editing === "new" ? { zone: ZONE_IDS.includes(tab) ? tab : "alacena" } : editing}
           onClose={() => setEditing(null)} onSave={save} />
       )}
@@ -416,7 +462,7 @@ function ShoppingList({ items, allItems, searching, query, onRestock, onCopy }) 
   );
 }
 
-function ProductModal({ initial, onClose, onSave }) {
+function ProductModal({ initial, names, onClose, onSave }) {
   const [f, setF] = useState(() => ({
     name: "", emoji: "🛒", zone: "alacena", qty: 1, unit: "piezas", ...initial,
   }));
@@ -489,12 +535,19 @@ function ProductModal({ initial, onClose, onSave }) {
                 className={`${field} mt-1 text-center text-2xl`} />
             </label>
             <label className="min-w-0 flex-1 text-sm">Nombre
-              <input ref={nameRef} name="nombre" autoComplete="off" value={f.name} onChange={(e) => set("name", e.target.value)}
+              <input ref={nameRef} name="nombre" autoComplete="off" list={names?.length ? "nombres-despensa" : undefined} value={f.name} onChange={(e) => set("name", e.target.value)}
                 placeholder="Ej. aceite de oliva…" aria-invalid={!!errors.name} aria-describedby={errors.name ? "err-name" : undefined}
                 className={`${field} mt-1`} />
               {errors.name && <span id="err-name" role="alert" className="mt-1 block text-red-600 dark:text-red-400">{errors.name}</span>}
             </label>
           </div>
+
+          {names?.length > 0 && <datalist id="nombres-despensa">{names.map((n) => <option key={n} value={n} />)}</datalist>}
+          {f.barcode && (
+            <p className={`text-xs ${muted}`}>
+              Código de barras: <span className="font-mono">{f.barcode}</span>. Si ya tienes este producto, escribe su nombre igual y se vinculará.
+            </p>
+          )}
 
           <label className="block text-sm">Zona
             <select name="zona" autoComplete="off" value={f.zone} onChange={(e) => set("zone", e.target.value)} className={`${field} mt-1`}>

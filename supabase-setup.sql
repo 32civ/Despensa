@@ -11,6 +11,7 @@ create table if not exists public.items (
   unit         text   not null,
   par          numeric not null default 1 check (par >= 0),
   sort_order   bigint not null default 0,
+  barcode      text   check (barcode is null or barcode ~ '^[0-9]{6,14}$'),
   updated_at   timestamptz not null default now(),
   primary key (household_id, id)
 );
