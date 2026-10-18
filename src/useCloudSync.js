@@ -4,9 +4,11 @@ import { supabase, cloudEnabled } from "./supabase";
 const toRow = (houseId, it) => ({
   household_id: houseId, id: it.id, name: it.name, emoji: it.emoji, zone: it.zone,
   qty: it.qty, unit: it.unit, par: it.par, sort_order: it.order ?? 0,
+  ...(it.scanQty ? { scan_qty: it.scanQty } : {}),
   ...(it.barcode ? { barcode: it.barcode } : {}), // solo si existe: la app sigue funcionando antes de la migración
 });
-const fromRow = ({ household_id, sort_order, updated_at, ...rest }) => ({ ...rest, order: sort_order });
+const COLUMN = { order: "sort_order", scanQty: "scan_qty" }; // campo de la app → columna
+const fromRow = ({ household_id, sort_order, scan_qty, updated_at, ...rest }) => ({ ...rest, order: sort_order, scanQty: scan_qty ?? null });
 
 /**
  * Sincroniza `items` con la tabla public.items de Supabase.
@@ -113,7 +115,7 @@ export function useCloudSync(houseId, items, setLocal) {
       if (!old) { newRows.push(toRow(houseId, { ...it, order: it.order ?? Date.now() + n })); return; }
       const patch = {};
       for (const [k, v] of Object.entries(it)) {
-        if (k !== "id" && v !== old[k]) patch[k === "order" ? "sort_order" : k] = v;
+        if (k !== "id" && v !== old[k]) patch[COLUMN[k] ?? k] = v;
       }
       if (Object.keys(patch).length)
         ops.push(supabase.from("items").update(patch).eq("household_id", houseId).eq("id", it.id));

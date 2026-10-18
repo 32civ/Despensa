@@ -20,6 +20,17 @@ const ZONES = [
 const ZONE_IDS = ZONES.map((z) => z.id);
 const UNITS = ["piezas", "litros", "kg", "g", "paquetes", "latas", "botellas"];
 
+// Productos "por nivel" (frutas, verduras, carnes, quesos): sin contar unidades.
+// Se guardan con unit="nivel" y qty 2 = Hay, 1 = Poco, 0 = Se acabó (no requiere cambios en la base de datos).
+const LEVEL_UNIT = "nivel";
+const LEVELS = [
+  { v: 2, label: "Hay", on: "border-emerald-700 bg-emerald-700 text-white" },
+  { v: 1, label: "Poco", on: "border-amber-500 bg-amber-500 text-stone-900" },
+  { v: 0, label: "Se acabó", on: "border-red-600 bg-red-600 text-white" },
+];
+const isLevel = (i) => i.unit === LEVEL_UNIT;
+const needsBuying = (i) => i.qty === 0 || (isLevel(i) && i.qty === 1); // agotado o "queda poco"
+
 const MOCK = [
   ["Leche", "🥛", "refrigerador", 2, "litros"],
   ["Huevos", "🥚", "refrigerador", 12, "piezas"],
@@ -112,7 +123,9 @@ function buildShoppingMessage(items) {
     const list = items.filter((i) => i.zone === z.id);
     if (!list.length) continue;
     lines.push(`${z.emoji} *${z.name}*`);
-    list.forEach((i) => lines.push(`• ${i.name} – ${nf.format(i.par)} ${i.unit}`));
+    list.forEach((i) => lines.push(isLevel(i)
+      ? `• ${i.name} – ${i.qty === 1 ? "queda poco" : "se acabó"}`
+      : `• ${i.name} – ${nf.format(i.par)} ${i.unit}`));
     lines.push("");
   }
   return lines.join("\n").trim();
@@ -159,7 +172,8 @@ export default function App() {
     timer.current = setTimeout(() => setToast(null), 6000);
   };
 
-  const soldOut = items.filter((i) => i.qty === 0);
+  // "soldOut" = por comprar: agotados y los de nivel "Poco".
+  const soldOut = items.filter(needsBuying);
   const q = query.trim().toLowerCase();
   const match = (i) => i.name.toLowerCase().includes(q);
   const visible = items.filter((i) => (tab === "todo" || i.zone === tab) && match(i));
@@ -176,8 +190,9 @@ export default function App() {
     notify(`«${item.name}» agregado a la lista de compras`, () => update(item.id, { qty: item.qty }));
   };
   const restock = (item) => {
+    const before = item.qty;
     update(item.id, { qty: Math.max(1, item.par) });
-    notify(`«${item.name}» reabastecido`, () => update(item.id, { qty: 0 }));
+    notify(`«${item.name}» reabastecido`, () => update(item.id, { qty: before }));
   };
   const remove = (item) => {
     const index = items.findIndex((i) => i.id === item.id);
@@ -200,9 +215,9 @@ export default function App() {
     setItems((l) =>
       data.id
         ? l.map((i) => i.id === data.id
-            ? { ...i, ...data, par: data.qty > 0 && data.qty !== i.qty ? data.qty : i.par }
+            ? { ...i, ...data, par: data.unit === LEVEL_UNIT ? 2 : data.qty > 0 && data.qty !== i.qty ? data.qty : i.par }
             : i)
-        : [...l, { ...data, id: uid(), par: Math.max(1, data.qty), order: Date.now() }]
+        : [...l, { ...data, id: uid(), par: data.unit === LEVEL_UNIT ? 2 : Math.max(1, data.qty), order: Date.now() }]
     );
     setEditing(null);
   };
@@ -213,14 +228,32 @@ export default function App() {
     if (!code) return { type: "error", msg: `Código no válido: ${String(raw).slice(0, 20)}` };
     const item = itemsRef.current.find((i) => i.barcode === code);
     if (item) {
-      const qty = round(item.qty + 1);
+      if (isLevel(item)) {
+        update(item.id, { qty: 2, par: 2 });
+        return { type: "level", msg: `${item.emoji} ${item.name}: Hay` };
+      }
+      const step = item.scanQty ?? 1; // cantidad habitual que la app aprendió para este producto
+      const qty = round(item.qty + step);
       update(item.id, { qty, par: Math.max(item.par, qty) });
-      return { type: "added", msg: `${item.emoji} ${item.name} +1 (ahora ${nf.format(qty)} ${item.unit})` };
+      return { type: "added", itemId: item.id, step, msg: `${item.emoji} ${item.name} +${nf.format(step)} (ahora ${nf.format(qty)} ${item.unit})` };
     }
     const info = await lookupProduct(code);
     setEditing({ name: info?.name ?? "", emoji: info?.emoji ?? "🛒", zone: info?.zone ?? "alacena", qty: 1, unit: "piezas", barcode: code });
     return { type: "new", msg: info ? `Producto nuevo: ${info.name}. Confírmalo.` : `Código ${code} sin datos. Escribe el nombre una vez.` };
   };
+
+  const adjustScan = (itemId, delta, added) => {
+    const item = itemsRef.current.find((i) => i.id === itemId);
+    if (!item) return;
+    const qty = Math.max(0, round(item.qty + delta));
+    update(itemId, { qty, par: Math.max(item.par, qty), ...(added > 0 ? { scanQty: added } : {}) });
+  };
+  const setLevel = (item, v) => {
+    update(item.id, { qty: v, par: 2 });
+    if (v < 2) notify(`«${item.name}»: ${v === 1 ? "queda poco" : "se acabó"}`, () => update(item.id, { qty: item.qty }));
+  };
+  const freshHay = (id) => update(id, { qty: 2, par: 2 });
+  const newFresh = () => setEditing({ name: "", emoji: "🥬", zone: "refrigerador", qty: 2, unit: LEVEL_UNIT });
 
   const copyList = async () => {
     try {
@@ -231,7 +264,7 @@ export default function App() {
     }
   };
 
-  const soldOutLabel = `${soldOut.length} ${soldOut.length === 1 ? "agotado" : "agotados"}`;
+  const soldOutLabel = `${soldOut.length} por comprar`;
 
   return (
     <div className="min-h-dvh bg-stone-100 text-stone-900 transition-colors dark:bg-[#0f1a16] dark:text-stone-100"
@@ -297,7 +330,7 @@ export default function App() {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {visible.map((item) => (
               <ItemCard key={item.id} item={item}
-                onQty={changeQty} onSoldOut={markSoldOut}
+                onQty={changeQty} onLevel={setLevel} onSoldOut={markSoldOut}
                 onEdit={() => setEditing(item)} onDelete={() => remove(item)} />
             ))}
           </div>
@@ -336,7 +369,8 @@ export default function App() {
 
       {scanning && (
         <Suspense fallback={null}>
-          <Scanner paused={!!editing} onClose={() => setScanning(false)} onCode={scanCode} />
+          <Scanner items={items} paused={!!editing} onClose={() => setScanning(false)} onCode={scanCode}
+            onAdjust={adjustScan} onFresh={freshHay} onNewFresh={newFresh} />
         </Suspense>
       )}
 
@@ -363,12 +397,14 @@ function Tab({ active, accent, children, ...props }) {
   );
 }
 
-function ItemCard({ item, onQty, onSoldOut, onEdit, onDelete }) {
+function ItemCard({ item, onQty, onLevel, onSoldOut, onEdit, onDelete }) {
   const out = item.qty === 0;
+  const poco = isLevel(item) && item.qty === 1;
   const zone = ZONES.find((z) => z.id === item.zone);
   return (
     <article className={`rounded-2xl border p-4 transition-colors ${
       out ? "border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/30"
+          : poco ? "border-amber-400 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/20"
           : "border-stone-200 bg-white dark:border-emerald-950 dark:bg-[#16261f]"}`}>
       <div className="flex items-start gap-2">
         <div className={`flex min-w-0 flex-1 items-start gap-3 ${out ? "opacity-60" : ""}`}>
@@ -390,6 +426,18 @@ function ItemCard({ item, onQty, onSoldOut, onEdit, onDelete }) {
 
       {out && <span className="mt-2 inline-block rounded-md bg-red-600 px-2 py-0.5 text-xs font-bold text-white">Agotado</span>}
 
+      {poco && <span className="mt-2 inline-block rounded-md bg-amber-500 px-2 py-0.5 text-xs font-bold text-stone-900">Queda poco</span>}
+
+      {isLevel(item) ? (
+        <div role="group" aria-label={`Nivel de ${item.name}`} className="mt-3 grid grid-cols-3 gap-2">
+          {LEVELS.map((l) => (
+            <button key={l.v} aria-pressed={item.qty === l.v} onClick={() => onLevel(item, l.v)}
+              className={`h-11 rounded-xl border text-sm font-semibold ${ring} ${item.qty === l.v ? l.on : "border-stone-300 bg-white hover:bg-stone-200 dark:border-emerald-900 dark:bg-[#16261f] dark:hover:bg-emerald-950"}`}>
+              {l.label}
+            </button>
+          ))}
+        </div>
+      ) : (
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           <button onClick={() => onQty(item, -1)} disabled={out} aria-label={`Restar uno a ${item.name}`}
@@ -410,6 +458,7 @@ function ItemCard({ item, onQty, onSoldOut, onEdit, onDelete }) {
           Agotado
         </button>
       </div>
+      )}
     </article>
   );
 }
@@ -446,7 +495,7 @@ function ShoppingList({ items, allItems, searching, query, onRestock, onCopy }) 
                   <span aria-hidden="true" className="text-2xl">{i.emoji}</span>
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-medium" title={i.name}>{i.name}</p>
-                    <p className={`text-sm ${muted}`}>Habitual: {nf.format(i.par)} {i.unit}</p>
+                    <p className={`text-sm ${muted}`}>{isLevel(i) ? (i.qty === 1 ? "Queda poco" : "Se acabó") : `Habitual: ${nf.format(i.par)} ${i.unit}`}</p>
                   </div>
                   <button onClick={() => onRestock(i)} aria-label={`Reabastecer ${i.name}`}
                     className={`h-11 shrink-0 rounded-xl bg-emerald-700 px-3 text-sm font-semibold text-white hover:bg-emerald-600 ${ring}`}>
@@ -476,6 +525,9 @@ function ProductModal({ initial, names, onClose, onSave }) {
     setF((s) => ({ ...s, [k]: v }));
     setErrors((e) => ({ ...e, [k]: undefined }));
   };
+  const level = f.unit === LEVEL_UNIT;
+  const switchMode = (toLevel) =>
+    setF((s) => (toLevel ? { ...s, unit: LEVEL_UNIT, qty: 2 } : { ...s, unit: "piezas", qty: 1 }));
 
   useEffect(() => {
     const opener = document.activeElement;
@@ -555,7 +607,28 @@ function ProductModal({ initial, names, onClose, onSave }) {
             </select>
           </label>
 
-          <div className="flex gap-3">
+          <fieldset className="space-y-2">
+            <legend className="text-sm">Cómo llevar la cantidad</legend>
+            <div className="grid grid-cols-2 gap-2">
+              {[[false, "Cantidad exacta"], [true, "Por nivel"]].map(([toLevel, label]) => (
+                <button key={label} type="button" aria-pressed={level === toLevel} onClick={() => switchMode(toLevel)}
+                  className={`h-11 rounded-xl border text-sm font-semibold ${ring} ${level === toLevel ? "border-emerald-700 bg-emerald-700 text-white" : "border-stone-300 bg-white dark:border-emerald-900 dark:bg-[#0f1a16]"}`}>{label}</button>
+              ))}
+            </div>
+            {level && (
+              <>
+                <div role="group" aria-label="Nivel actual" className="grid grid-cols-3 gap-2">
+                  {LEVELS.map((l) => (
+                    <button key={l.v} type="button" aria-pressed={Number(f.qty) === l.v} onClick={() => set("qty", l.v)}
+                      className={`h-11 rounded-xl border text-sm font-semibold ${ring} ${Number(f.qty) === l.v ? l.on : "border-stone-300 bg-white dark:border-emerald-900 dark:bg-[#0f1a16]"}`}>{l.label}</button>
+                  ))}
+                </div>
+                <p className={`text-xs ${muted}`}>Ideal para frutas, verduras, carnes y quesos. «Poco» pasa a la lista de compras como aviso.</p>
+              </>
+            )}
+          </fieldset>
+
+          <div className={`flex gap-3 ${level ? "hidden" : ""}`}>
             <label className="w-32 text-sm">Cantidad
               <input ref={qtyRef} name="cantidad" type="number" inputMode="decimal" min="0" step="any" autoComplete="off"
                 value={f.qty} onChange={(e) => set("qty", e.target.value)}
